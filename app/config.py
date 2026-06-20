@@ -19,6 +19,7 @@ class Settings:
     # attacker can't make unlimited guesses at order_id/email combinations.
     verification_max_attempts: int = int(os.getenv("VERIFICATION_MAX_ATTEMPTS", "5"))
     verification_window_minutes: int = int(os.getenv("VERIFICATION_WINDOW_MINUTES", "10"))
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
 
 
 settings = Settings()

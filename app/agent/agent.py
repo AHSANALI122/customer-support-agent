@@ -12,9 +12,11 @@ from functools import lru_cache
 
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlmodel import Session, select
 
+from app.agent.logging_callback import ToolLoggingCallback
 from app.agent.prompts import build_system_prompt
 from app.agent.tools import CUSTOMER_TOOLS, current_session_id
 from app.config import settings
@@ -83,5 +85,8 @@ def run_agent(
     messages.extend(_load_history(session_id))
     messages.append(HumanMessage(content=message))
 
-    result = get_agent().invoke({"messages": messages})
+    result = get_agent().invoke(
+        {"messages": messages},
+        config=RunnableConfig(callbacks=[ToolLoggingCallback()]),
+    )
     return result["messages"][-1].content
