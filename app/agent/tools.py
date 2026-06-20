@@ -8,6 +8,7 @@ anything — this enforces the lightweight verification rule from F8.
 from langchain_core.tools import tool
 from sqlmodel import Session, select
 
+from app.config import settings
 from app.db import engine
 from app.models import (
     Customer,
@@ -18,7 +19,7 @@ from app.models import (
     RefundRequest,
     RefundStatus,
 )
-from app.rag.retriever import get_retriever
+from app.rag.retriever import search_with_scores
 
 # Generic message used whenever an email doesn't match an order. It never
 # reveals which value was wrong, so it can't be used to probe for valid
@@ -184,15 +185,29 @@ def create_refund_request(order_id: int, email: str, reason: str) -> str:
         )
 
 
+# Prefix the agent watches for to recognise a weak policy match. When it sees
+# this, it hedges and offers escalation instead of answering confidently (F5).
+LOW_CONFIDENCE_PREFIX = "LOW_CONFIDENCE"
+
+
 @tool
 def search_policy_docs(query: str) -> str:
     """Search the store's policy documents (returns, shipping, payments, and
     other general store policies) for information relevant to the customer's
     question."""
-    docs = get_retriever().invoke(query)
-    if not docs:
+    results = search_with_scores(query)
+    if not results:
         return "I couldn't find any relevant policy information for that question."
-    return "\n\n---\n\n".join(d.page_content for d in docs)
+    top_score = results[0][1]
+    chunks = "\n\n---\n\n".join(doc.page_content for doc, _ in results)
+    if top_score < settings.confidence_threshold:
+        return (
+            f"{LOW_CONFIDENCE_PREFIX}: the closest policy match scored "
+            f"{top_score:.2f}, below the {settings.confidence_threshold} "
+            "confidence threshold. Treat the excerpts below as uncertain — do "
+            "not state them as definitive:\n\n" + chunks
+        )
+    return chunks
 
 
 # Registered together for the agent core (F5).

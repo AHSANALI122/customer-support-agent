@@ -1,4 +1,5 @@
 from langchain_chroma import Chroma
+from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
@@ -24,3 +25,10 @@ def get_retriever(k: int = 4) -> VectorStoreRetriever:
         search_type="similarity",
         search_kwargs={"k": k},
     )
+
+
+def search_with_scores(query: str, k: int = 4) -> list[tuple[Document, float]]:
+    """Top-k policy chunks paired with relevance scores (0–1, higher = more
+    relevant). Lets callers judge confidence in a match, which the plain
+    retriever's documents alone don't expose."""
+    return get_vectorstore().similarity_search_with_relevance_scores(query, k=k)
