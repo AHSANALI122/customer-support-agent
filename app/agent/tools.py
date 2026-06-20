@@ -24,6 +24,7 @@ from app.models import (
     Product,
     RefundRequest,
     RefundStatus,
+    RetrievalLog,
     SupportTicket,
     TicketStatus,
     VerificationThrottle,
@@ -361,10 +362,13 @@ def search_policy_docs(query: str) -> str:
     question."""
     results = search_with_scores(query)
     if not results:
+        _log_retrieval(query, top_score=0.0, was_confident=False)
         return "I couldn't find any relevant policy information for that question."
     top_score = results[0][1]
+    was_confident = top_score >= settings.confidence_threshold
+    _log_retrieval(query, top_score=top_score, was_confident=was_confident)
     chunks = "\n\n---\n\n".join(doc.page_content for doc, _ in results)
-    if top_score < settings.confidence_threshold:
+    if not was_confident:
         return (
             f"{LOW_CONFIDENCE_PREFIX}: the closest policy match scored "
             f"{top_score:.2f}, below the {settings.confidence_threshold} "
@@ -372,6 +376,17 @@ def search_policy_docs(query: str) -> str:
             "not state them as definitive:\n\n" + chunks
         )
     return chunks
+
+
+def _log_retrieval(query: str, top_score: float, was_confident: bool) -> None:
+    with Session(engine) as db:
+        db.add(RetrievalLog(
+            session_id=current_session_id.get(),
+            query=query,
+            top_score=top_score,
+            was_confident=was_confident,
+        ))
+        db.commit()
 
 
 # Ticket statuses that count as an active, unresolved case. A session already

@@ -25,3 +25,10 @@ class RetrievalLog(SQLModel, table=True):
     top_score: float
     was_confident: bool
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class ToolCallLog(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    session_id: Optional[uuid.UUID] = Field(default=None, foreign_key="chatsession.id")
+    tool_name: str
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

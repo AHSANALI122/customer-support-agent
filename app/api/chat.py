@@ -121,35 +121,37 @@ async def chat_stream(body: ChatRequest, request: Request):
         session_id = chat_session.id
 
     async def event_generator():
-        full_reply = None
         try:
             async for chunk in stream_agent(session_id, body.message, body.customer_email):
                 if await request.is_disconnected():
                     return
                 if chunk.startswith("event: done"):
                     data = json.loads(chunk.split("data: ", 1)[1])
-                    full_reply = data["full_reply"]
+                    full_reply = data.get("full_reply")
+                    message_id = None
+                    if full_reply is not None:
+                        with Session(engine) as db_session:
+                            db_session.add(
+                                ChatMessage(
+                                    session_id=session_id,
+                                    role=MessageRole.user,
+                                    content=body.message,
+                                )
+                            )
+                            assistant_msg = ChatMessage(
+                                session_id=session_id,
+                                role=MessageRole.assistant,
+                                content=full_reply,
+                            )
+                            db_session.add(assistant_msg)
+                            db_session.commit()
+                            db_session.refresh(assistant_msg)
+                            message_id = assistant_msg.id
+                    yield f"event: done\ndata: {json.dumps({**data, 'message_id': message_id})}\n\n"
+                    continue
                 yield chunk
         except asyncio.CancelledError:
             return
-        finally:
-            if full_reply is not None:
-                with Session(engine) as db_session:
-                    db_session.add(
-                        ChatMessage(
-                            session_id=session_id,
-                            role=MessageRole.user,
-                            content=body.message,
-                        )
-                    )
-                    db_session.add(
-                        ChatMessage(
-                            session_id=session_id,
-                            role=MessageRole.assistant,
-                            content=full_reply,
-                        )
-                    )
-                    db_session.commit()
 
     return StreamingResponse(
         event_generator(),

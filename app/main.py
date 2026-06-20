@@ -7,7 +7,9 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, text
 
+from app.api.analytics import router as analytics_router
 from app.api.chat import router as chat_router
+from app.api.feedback import router as feedback_router
 from app.api.orders import router as orders_router
 from app.api.tickets import router as tickets_router
 from app.config import settings
@@ -29,6 +31,8 @@ app = FastAPI(title="Customer Support Agent", lifespan=lifespan)
 app.include_router(orders_router)
 app.include_router(chat_router)
 app.include_router(tickets_router)
+app.include_router(feedback_router)
+app.include_router(analytics_router)
 
 
 @app.get("/health")

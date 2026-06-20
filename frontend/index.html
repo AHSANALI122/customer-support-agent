@@ -121,17 +121,42 @@
       // The assistant bubble is created on the first token so tokens can be
       // appended in-place; null means no bubble yet.
       let assistantBubble = null;
+      let feedbackRow = null;
 
       function getOrCreateAssistantBubble() {
         if (assistantBubble) return assistantBubble;
         setLoading(false);
+        const outer = document.createElement('div');
+        outer.className = 'flex flex-col items-start';
+
         const wrapper = document.createElement('div');
-        wrapper.className = 'flex justify-start';
+        wrapper.className = 'flex justify-start w-full';
         assistantBubble = document.createElement('div');
         assistantBubble.className =
           'bg-gray-100 text-gray-800 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] text-sm leading-relaxed';
         wrapper.appendChild(assistantBubble);
-        messagesEl.appendChild(wrapper);
+
+        feedbackRow = document.createElement('div');
+        feedbackRow.className = 'hidden flex gap-2 mt-1 ml-1 items-center';
+
+        const upBtn = document.createElement('button');
+        upBtn.className = 'text-gray-400 hover:text-green-500 transition-colors text-base';
+        upBtn.title = 'Helpful';
+        upBtn.dataset.rating = 'up';
+        upBtn.textContent = '👍';
+
+        const downBtn = document.createElement('button');
+        downBtn.className = 'text-gray-400 hover:text-red-500 transition-colors text-base';
+        downBtn.title = 'Not helpful';
+        downBtn.dataset.rating = 'down';
+        downBtn.textContent = '👎';
+
+        feedbackRow.appendChild(upBtn);
+        feedbackRow.appendChild(downBtn);
+
+        outer.appendChild(wrapper);
+        outer.appendChild(feedbackRow);
+        messagesEl.appendChild(outer);
         return assistantBubble;
       }
 
@@ -183,6 +208,23 @@
               // render the full reply from the done payload.
               if (!assistantBubble && payload.full_reply) {
                 appendMessage('assistant', payload.full_reply);
+              }
+              if (payload.message_id && feedbackRow) {
+                feedbackRow.classList.remove('hidden');
+                feedbackRow.querySelectorAll('button').forEach(btn => {
+                  btn.addEventListener('click', async () => {
+                    feedbackRow.querySelectorAll('button').forEach(b => b.disabled = true);
+                    try {
+                      await fetch('/feedback', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ message_id: payload.message_id, rating: btn.dataset.rating }),
+                      });
+                    } finally {
+                      feedbackRow.innerHTML = '<span class="text-green-500 text-xs">Thanks for your feedback!</span>';
+                    }
+                  });
+                });
               }
             }
           }
