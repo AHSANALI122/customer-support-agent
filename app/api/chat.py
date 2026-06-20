@@ -10,11 +10,12 @@ stored in `ChatMessage`.
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
@@ -81,10 +82,16 @@ def chat(body: ChatRequest):
         chat_session = _ensure_session(session, body.session_id, body.customer_email)
         session_id = chat_session.id
 
-    # Run the agent before persisting the user message: run_agent loads recent
-    # history from the DB and appends the current message itself, so writing the
-    # user turn first would duplicate it in the model's context.
-    reply = run_agent(session_id, body.message, body.customer_email)
+    # run_agent never raises (F13) — it returns a fallback string on failure.
+    # The try/except here is a last-resort safety net for truly unexpected errors.
+    try:
+        reply = run_agent(session_id, body.message, body.customer_email)
+    except Exception:
+        logging.exception("run_agent raised unexpectedly for session %s", session_id)
+        return JSONResponse(
+            status_code=500,
+            content={"error": "Something went wrong, please try again."},
+        )
 
     # Persist user message + assistant reply together so we never leave a user
     # turn saved without its reply.
@@ -152,6 +159,9 @@ async def chat_stream(body: ChatRequest, request: Request):
                 yield chunk
         except asyncio.CancelledError:
             return
+        except Exception:
+            logging.exception("event_generator failed for session %s", session_id)
+            yield 'event: error\ndata: {"message": "Something went wrong, please try again."}\n\n'
 
     return StreamingResponse(
         event_generator(),
