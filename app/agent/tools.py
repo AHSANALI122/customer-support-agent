@@ -8,6 +8,7 @@ anything — this enforces the lightweight verification rule from F8.
 
 import contextvars
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from langchain_core.tools import tool
 from sqlmodel import Session, select
@@ -25,6 +26,7 @@ from app.models import (
     RefundStatus,
     SupportTicket,
     TicketStatus,
+    VerificationThrottle,
 )
 from app.rag.retriever import search_with_scores
 
@@ -42,6 +44,121 @@ MISMATCH_MSG = (
     "order ID and the email address used for the purchase."
 )
 
+# Returned once an email has used up its verification attempts (F8). The
+# message stays generic so it never confirms whether the email is even real.
+THROTTLE_MSG = (
+    "For your security I've paused order lookups for this email after several "
+    "failed verification attempts."
+)
+
+
+def _throttle_key(email: str) -> str:
+    """Normalise the email used as the throttle key. Lower-cased so trivial
+    case changes can't be used to dodge the limit; empty when no email was
+    supplied, in which case the caller skips throttling entirely."""
+    return (email or "").strip().lower()
+
+
+def _is_throttled(session: Session, key: str) -> bool:
+    """True if this email has hit the failed-attempt limit within the window.
+
+    Keyed on the email being verified rather than the chat session, so starting
+    a fresh session does not reset the limit (F8). A window that has fully
+    elapsed since the last failure is treated as not throttled, so a legitimate
+    customer is never locked out indefinitely.
+    """
+    if not key:
+        return False
+    entry = session.get(VerificationThrottle, key)
+    if entry is None or entry.last_mismatch_at is None:
+        return False
+    if entry.mismatch_count < settings.verification_max_attempts:
+        return False
+    window = timedelta(minutes=settings.verification_window_minutes)
+    last = entry.last_mismatch_at
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last < window
+
+
+def _record_failure(session: Session, key: str) -> None:
+    """Count a failed order/email verification for an email, resetting the
+    counter when the previous failure fell outside the rolling window."""
+    if not key:
+        return
+    now = datetime.now(timezone.utc)
+    entry = session.get(VerificationThrottle, key)
+    if entry is None:
+        entry = VerificationThrottle(email=key, mismatch_count=1, last_mismatch_at=now)
+    else:
+        last = entry.last_mismatch_at
+        if last is not None and last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        window = timedelta(minutes=settings.verification_window_minutes)
+        if last is None or now - last >= window:
+            # A fresh lockout window starts: clear the per-lockout ticket flag.
+            entry.mismatch_count = 1
+            entry.ticket_opened = False
+        else:
+            entry.mismatch_count += 1
+        entry.last_mismatch_at = now
+    session.add(entry)
+    session.commit()
+
+
+def _clear_failures(session: Session, key: str) -> None:
+    """Reset the failed-attempt counter after a successful verification."""
+    if not key:
+        return
+    entry = session.get(VerificationThrottle, key)
+    if entry is None or (entry.mismatch_count == 0 and not entry.ticket_opened):
+        return
+    entry.mismatch_count = 0
+    entry.last_mismatch_at = None
+    entry.ticket_opened = False
+    session.add(entry)
+    session.commit()
+
+
+def _try_open_throttle_ticket(
+    session: Session, key: str, session_id: uuid.UUID | None
+) -> str | None:
+    """Open one escalation ticket per email lockout. Returns the ticket message
+    the first time it's called during a lockout, or None if a ticket was already
+    opened for this lockout (even from a different, rotated session) or there's
+    no session to attach it to."""
+    if session_id is None:
+        return None
+    entry = session.get(VerificationThrottle, key)
+    if entry is None or entry.ticket_opened:
+        return None
+    msg = _open_ticket(
+        session,
+        session_id,
+        "Identity verification needed — repeated failed order lookups",
+    )
+    entry.ticket_opened = True
+    session.add(entry)
+    session.commit()
+    return msg
+
+
+def _throttled_response(
+    session: Session, key: str, session_id: uuid.UUID | None
+) -> str | None:
+    """If this email is currently locked out, count the attempt, open one
+    escalation ticket per lockout, and return the message to show the customer.
+    Returns None when the email is not throttled (the caller proceeds normally).
+    Shared by every email-based lookup so none of them is an unthrottled hole."""
+    if not _is_throttled(session, key):
+        return None
+    # Refresh the window so continued guessing keeps the email locked.
+    _record_failure(session, key)
+    ticket_msg = _try_open_throttle_ticket(session, key, session_id)
+    if ticket_msg:
+        return f"{THROTTLE_MSG} {ticket_msg}"
+    return THROTTLE_MSG
+
 
 def _verify_order(session: Session, order_id: int, email: str):
     """Resolve and verify an order against the supplied email.
@@ -49,19 +166,40 @@ def _verify_order(session: Session, order_id: int, email: str):
     Returns (order, None) on success or (None, error_message) otherwise.
     A genuinely non-existent order_id yields a specific "not found"
     message; any email mismatch yields the generic MISMATCH_MSG.
+
+    Repeated failures (not-found or mismatch) within the configured window are
+    throttled per email: once the limit is hit, further failed lookups return
+    THROTTLE_MSG instead of leaking which value was wrong, so order_id/email
+    combinations can't be guessed without limit (F8). Keying on the email rather
+    than the chat session means an attacker can't reset the limit by starting a
+    new session. A genuinely correct order_id + email still verifies and clears
+    the throttle immediately, so a legitimate customer is never locked out by
+    their own earlier typos.
     """
+    session_id = current_session_id.get()
+    key = _throttle_key(email)
     order = session.get(Order, order_id)
+    if order is not None:
+        customer = session.exec(
+            select(Customer).where(Customer.email == email)
+        ).first()
+        if customer is not None and order.customer_id == customer.id:
+            _clear_failures(session, key)
+            return order, None
+
+    # Verification failed (unknown order or email mismatch). A correct
+    # order_id + email above bypasses this, so a legitimate customer is never
+    # blocked by the lockout — only continued failures are.
+    throttled = _throttled_response(session, key, session_id)
+    if throttled is not None:
+        return None, throttled
+    _record_failure(session, key)
     if order is None:
         return None, (
             f"I couldn't find an order with ID #{order_id}. "
             "Please double-check the order number."
         )
-    customer = session.exec(
-        select(Customer).where(Customer.email == email)
-    ).first()
-    if customer is None or order.customer_id != customer.id:
-        return None, MISMATCH_MSG
-    return order, None
+    return None, MISMATCH_MSG
 
 
 @tool
@@ -69,11 +207,24 @@ def list_orders_by_email(email: str) -> str:
     """List a customer's recent orders (id, status, total, date) for the
     email used at checkout. Use this when a customer asks about their
     order(s) but hasn't provided a specific order ID."""
+    # This tool hands back order data from an email alone, so it is the weakest
+    # link (F8 #2): it must honour the per-email lockout, otherwise it could be
+    # used to enumerate a victim's order IDs or to sidestep a lockout on the
+    # order-specific tools. Unlike _verify_order there's no stronger proof to
+    # bypass with, so we check the throttle up front before returning anything.
+    session_id = current_session_id.get()
+    key = _throttle_key(email)
     with Session(engine) as session:
+        throttled = _throttled_response(session, key, session_id)
+        if throttled is not None:
+            return throttled
         customer = session.exec(
             select(Customer).where(Customer.email == email)
         ).first()
         if customer is None:
+            # A non-existent account is a failed verification attempt — count it
+            # so the email can't be probed without limit.
+            _record_failure(session, key)
             return (
                 "I couldn't find any account with that email. Please confirm "
                 "the email address used for your purchase."
@@ -228,6 +379,38 @@ def search_policy_docs(query: str) -> str:
 _ACTIVE_TICKET_STATUSES = [TicketStatus.open, TicketStatus.in_progress]
 
 
+def _open_ticket(session: Session, session_id: uuid.UUID, subject: str) -> str:
+    """Open a support ticket for a session, reusing the F7 duplicate guard so a
+    session never spawns a second active ticket. Operates on the caller's DB
+    session. Shared by the create_ticket tool and the verification throttle."""
+    existing = session.exec(
+        select(SupportTicket)
+        .where(SupportTicket.session_id == session_id)
+        .where(SupportTicket.status.in_(_ACTIVE_TICKET_STATUSES))
+    ).first()
+    if existing is not None:
+        return (
+            f"Your case is already with our support team (ticket "
+            f"#{existing.id}). A human will follow up — there's no need to "
+            "open another ticket."
+        )
+    chat_session = session.get(ChatSession, session_id)
+    customer_id = chat_session.customer_id if chat_session else None
+    ticket = SupportTicket(
+        session_id=session_id,
+        customer_id=customer_id,
+        subject=subject,
+        status=TicketStatus.open,
+    )
+    session.add(ticket)
+    session.commit()
+    session.refresh(ticket)
+    return (
+        f"I've opened support ticket #{ticket.id} for you. A member of our "
+        "team will review the conversation and follow up."
+    )
+
+
 @tool
 def create_ticket(subject: str) -> str:
     """Escalate the conversation to a human support agent by opening a support
@@ -243,32 +426,7 @@ def create_ticket(subject: str) -> str:
             "moment."
         )
     with Session(engine) as session:
-        existing = session.exec(
-            select(SupportTicket)
-            .where(SupportTicket.session_id == session_id)
-            .where(SupportTicket.status.in_(_ACTIVE_TICKET_STATUSES))
-        ).first()
-        if existing is not None:
-            return (
-                f"Your case is already with our support team (ticket "
-                f"#{existing.id}). A human will follow up — there's no need to "
-                "open another ticket."
-            )
-        chat_session = session.get(ChatSession, session_id)
-        customer_id = chat_session.customer_id if chat_session else None
-        ticket = SupportTicket(
-            session_id=session_id,
-            customer_id=customer_id,
-            subject=subject,
-            status=TicketStatus.open,
-        )
-        session.add(ticket)
-        session.commit()
-        session.refresh(ticket)
-        return (
-            f"I've opened support ticket #{ticket.id} for you. A member of our "
-            "team will review the conversation and follow up."
-        )
+        return _open_ticket(session, session_id, subject)
 
 
 # Registered together for the agent core (F5); create_ticket added for F7.

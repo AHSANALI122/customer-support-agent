@@ -4,6 +4,7 @@ from app.models.refund import RefundRequest, RefundStatus
 from app.models.chat import ChatSession, ChatMessage, MessageRole
 from app.models.ticket import SupportTicket, TicketStatus
 from app.models.feedback import MessageFeedback, RetrievalLog, FeedbackRating
+from app.models.throttle import VerificationThrottle
 
 __all__ = [
     "Customer",
@@ -21,4 +22,5 @@ __all__ = [
     "MessageFeedback",
     "RetrievalLog",
     "FeedbackRating",
+    "VerificationThrottle",
 ]
