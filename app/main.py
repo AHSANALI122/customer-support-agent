@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 import chromadb
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, text
 
 from app.api.chat import router as chat_router
@@ -55,3 +56,7 @@ def health():
 
     status = "ok" if all(v == "ok" for v in result.values()) else "error"
     return {"status": status, **result}
+
+
+# Serve the frontend — mounted last so API routes always take priority.
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")
