@@ -8,14 +8,17 @@ A new `ChatSession` is created automatically when no `session_id` is supplied
 stored in `ChatMessage`.
 """
 
+import asyncio
+import json
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from app.agent.agent import run_agent
+from app.agent.agent import run_agent, stream_agent
 from app.db import engine
 from app.models import ChatMessage, ChatSession, Customer, MessageRole
 
@@ -103,3 +106,53 @@ def chat(body: ChatRequest):
         session.commit()
 
     return ChatResponse(session_id=session_id, reply=reply)
+
+
+@router.post("/chat/stream")
+async def chat_stream(body: ChatRequest, request: Request):
+    """Stream the agent reply token-by-token as Server-Sent Events.
+
+    Event types: token | tool_call | done
+    The complete reply is persisted to ChatMessage only after the done event,
+    matching F6's atomicity guarantee (user + assistant saved together).
+    """
+    with Session(engine) as session:
+        chat_session = _ensure_session(session, body.session_id, body.customer_email)
+        session_id = chat_session.id
+
+    async def event_generator():
+        full_reply = None
+        try:
+            async for chunk in stream_agent(session_id, body.message, body.customer_email):
+                if await request.is_disconnected():
+                    return
+                if chunk.startswith("event: done"):
+                    data = json.loads(chunk.split("data: ", 1)[1])
+                    full_reply = data["full_reply"]
+                yield chunk
+        except asyncio.CancelledError:
+            return
+        finally:
+            if full_reply is not None:
+                with Session(engine) as db_session:
+                    db_session.add(
+                        ChatMessage(
+                            session_id=session_id,
+                            role=MessageRole.user,
+                            content=body.message,
+                        )
+                    )
+                    db_session.add(
+                        ChatMessage(
+                            session_id=session_id,
+                            role=MessageRole.assistant,
+                            content=full_reply,
+                        )
+                    )
+                    db_session.commit()
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
