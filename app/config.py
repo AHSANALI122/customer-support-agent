@@ -11,6 +11,9 @@ class Settings:
     embed_model_name: str = os.getenv("EMBED_MODEL_NAME", "models/text-embedding-004")
     chroma_path: str = os.getenv("CHROMA_PATH", "./chroma_db")
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
+    # Below this relevance score (0–1, higher = more relevant) a policy match is
+    # treated as low-confidence so the agent hedges instead of answering firmly.
+    confidence_threshold: float = float(os.getenv("CONFIDENCE_THRESHOLD", "0.5"))
 
 
 settings = Settings()
