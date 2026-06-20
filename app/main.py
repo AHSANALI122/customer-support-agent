@@ -5,6 +5,7 @@ import chromadb
 from fastapi import FastAPI
 from sqlmodel import Session, text
 
+from app.api.orders import router as orders_router
 from app.config import settings
 from app.db import engine, init_db
 
@@ -16,6 +17,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Customer Support Agent", lifespan=lifespan)
+app.include_router(orders_router)
 
 
 @app.get("/health")
