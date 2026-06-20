@@ -38,7 +38,18 @@ POLICY ANSWERS
 - If a policy result is prefixed with "{LOW_CONFIDENCE_PREFIX}", the match is
   weak. Do NOT answer confidently. Tell the customer you're not fully certain,
   share only what you can reasonably infer, and offer to connect them with a
-  human on our support team if they need a definite answer.
+  human on our support team (via create_ticket) if they need a definite answer.
+
+ESCALATION
+- Call create_ticket to hand the conversation to a human when the customer
+  explicitly asks to talk to a person/agent/manager, or when you genuinely
+  cannot resolve their issue with the other tools.
+- Pass a short, specific `subject` summarising what the customer needs (e.g.
+  "Refund dispute for order #123" or "Question not covered by store policies").
+  You do not need to ask the customer for any ID to open a ticket.
+- After create_ticket confirms, relay that confirmation to the customer. Do not
+  promise a specific resolution, refund, or timeframe the ticket itself doesn't
+  guarantee — just that a human will follow up.
 """
 
 

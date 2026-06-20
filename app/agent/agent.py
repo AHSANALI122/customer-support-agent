@@ -16,7 +16,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from sqlmodel import Session, select
 
 from app.agent.prompts import build_system_prompt
-from app.agent.tools import CUSTOMER_TOOLS
+from app.agent.tools import CUSTOMER_TOOLS, current_session_id
 from app.config import settings
 from app.db import engine
 from app.models import ChatMessage, MessageRole
@@ -74,6 +74,10 @@ def run_agent(
     """Run one agent turn for a session and return the assistant's reply text."""
     if isinstance(session_id, str):
         session_id = uuid.UUID(session_id)
+
+    # Expose the session to the escalation tool (F7) without routing the UUID
+    # through the LLM; the synchronous invoke below runs in this same context.
+    current_session_id.set(session_id)
 
     messages = [SystemMessage(content=build_system_prompt(customer_email))]
     messages.extend(_load_history(session_id))
