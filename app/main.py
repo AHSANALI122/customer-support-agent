@@ -3,7 +3,10 @@ import os
 from contextlib import asynccontextmanager
 
 import chromadb
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, text
 
@@ -23,11 +26,33 @@ async def lifespan(app: FastAPI):
         format="%(asctime)s %(levelname)-8s %(name)s %(message)s",
         datefmt="%Y-%m-%dT%H:%M:%S",
     )
+    # Fail loudly at startup if the DB is unreachable (F13). SQLAlchemy's
+    # create_engine is lazy, so this is the first actual connection attempt.
+    try:
+        with Session(engine) as session:
+            session.exec(text("SELECT 1"))
+    except Exception as e:
+        logging.critical("Database is unreachable at startup: %s", e)
+        raise
     init_db()
     yield
 
 
 app = FastAPI(title="Customer Support Agent", lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Let FastAPI's built-in handler deal with validation errors (clean 422).
+    if isinstance(exc, RequestValidationError):
+        return await request_validation_exception_handler(request, exc)
+    logging.exception("Unhandled exception on %s %s", request.method, request.url)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Something went wrong, please try again."},
+    )
+
+
 app.include_router(orders_router)
 app.include_router(chat_router)
 app.include_router(tickets_router)

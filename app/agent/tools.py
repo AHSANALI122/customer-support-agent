@@ -7,6 +7,7 @@ anything — this enforces the lightweight verification rule from F8.
 """
 
 import contextvars
+import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -213,79 +214,91 @@ def list_orders_by_email(email: str) -> str:
     # used to enumerate a victim's order IDs or to sidestep a lockout on the
     # order-specific tools. Unlike _verify_order there's no stronger proof to
     # bypass with, so we check the throttle up front before returning anything.
-    session_id = current_session_id.get()
-    key = _throttle_key(email)
-    with Session(engine) as session:
-        throttled = _throttled_response(session, key, session_id)
-        if throttled is not None:
-            return throttled
-        customer = session.exec(
-            select(Customer).where(Customer.email == email)
-        ).first()
-        if customer is None:
-            # A non-existent account is a failed verification attempt — count it
-            # so the email can't be probed without limit.
-            _record_failure(session, key)
-            return (
-                "I couldn't find any account with that email. Please confirm "
-                "the email address used for your purchase."
-            )
-        orders = session.exec(
-            select(Order)
-            .where(Order.customer_id == customer.id)
-            .order_by(Order.created_at.desc())
-            .limit(10)
-        ).all()
-        if not orders:
-            return "I couldn't find any orders associated with that email."
-        lines = [f"Found {len(orders)} recent order(s):"]
-        for o in orders:
-            lines.append(
-                f"- Order #{o.id} | {o.status.value} | "
-                f"${o.total:.2f} | {o.created_at.date()}"
-            )
-        return "\n".join(lines)
+    try:
+        session_id = current_session_id.get()
+        key = _throttle_key(email)
+        with Session(engine) as session:
+            throttled = _throttled_response(session, key, session_id)
+            if throttled is not None:
+                return throttled
+            customer = session.exec(
+                select(Customer).where(Customer.email == email)
+            ).first()
+            if customer is None:
+                # A non-existent account is a failed verification attempt — count it
+                # so the email can't be probed without limit.
+                _record_failure(session, key)
+                return (
+                    "I couldn't find any account with that email. Please confirm "
+                    "the email address used for your purchase."
+                )
+            orders = session.exec(
+                select(Order)
+                .where(Order.customer_id == customer.id)
+                .order_by(Order.created_at.desc())
+                .limit(10)
+            ).all()
+            if not orders:
+                return "I couldn't find any orders associated with that email."
+            lines = [f"Found {len(orders)} recent order(s):"]
+            for o in orders:
+                lines.append(
+                    f"- Order #{o.id} | {o.status.value} | "
+                    f"${o.total:.2f} | {o.created_at.date()}"
+                )
+            return "\n".join(lines)
+    except Exception:
+        logging.exception("list_orders_by_email failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 @tool
 def get_order_status(order_id: int, email: str) -> str:
     """Get the status, line items, and total for a specific order. Requires
     the order ID and the email used for the purchase to verify identity."""
-    with Session(engine) as session:
-        order, err = _verify_order(session, order_id, email)
-        if err:
-            return err
-        items = session.exec(
-            select(OrderItem).where(OrderItem.order_id == order.id)
-        ).all()
-        lines = [f"Order #{order.id} — status: {order.status.value}"]
-        if items:
-            lines.append("Items:")
-            for it in items:
-                product = session.get(Product, it.product_id)
-                name = product.name if product else f"Product #{it.product_id}"
-                lines.append(f"- {name} x{it.quantity} @ ${it.price:.2f}")
-        lines.append(f"Total: ${order.total:.2f}")
-        return "\n".join(lines)
+    try:
+        with Session(engine) as session:
+            order, err = _verify_order(session, order_id, email)
+            if err:
+                return err
+            items = session.exec(
+                select(OrderItem).where(OrderItem.order_id == order.id)
+            ).all()
+            lines = [f"Order #{order.id} — status: {order.status.value}"]
+            if items:
+                lines.append("Items:")
+                for it in items:
+                    product = session.get(Product, it.product_id)
+                    name = product.name if product else f"Product #{it.product_id}"
+                    lines.append(f"- {name} x{it.quantity} @ ${it.price:.2f}")
+            lines.append(f"Total: ${order.total:.2f}")
+            return "\n".join(lines)
+    except Exception:
+        logging.exception("get_order_status failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 @tool
 def get_tracking_info(order_id: int, email: str) -> str:
     """Get the tracking number and shipping status for a specific order.
     Requires the order ID and the email used for the purchase."""
-    with Session(engine) as session:
-        order, err = _verify_order(session, order_id, email)
-        if err:
-            return err
-        if not order.tracking_number:
+    try:
+        with Session(engine) as session:
+            order, err = _verify_order(session, order_id, email)
+            if err:
+                return err
+            if not order.tracking_number:
+                return (
+                    f"Order #{order.id} doesn't have a tracking number yet. "
+                    f"Its current status is {order.status.value}."
+                )
             return (
-                f"Order #{order.id} doesn't have a tracking number yet. "
-                f"Its current status is {order.status.value}."
+                f"Order #{order.id} — tracking number: {order.tracking_number} "
+                f"(status: {order.status.value})."
             )
-        return (
-            f"Order #{order.id} — tracking number: {order.tracking_number} "
-            f"(status: {order.status.value})."
-        )
+    except Exception:
+        logging.exception("get_tracking_info failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 @tool
@@ -293,19 +306,23 @@ def get_refund_status(order_id: int, email: str) -> str:
     """Check whether a refund request exists for an order and report its
     current status. Requires the order ID and the email used for the
     purchase."""
-    with Session(engine) as session:
-        order, err = _verify_order(session, order_id, email)
-        if err:
-            return err
-        refund = session.exec(
-            select(RefundRequest).where(RefundRequest.order_id == order.id)
-        ).first()
-        if refund is None:
-            return f"There's no refund request on file for order #{order.id}."
-        return (
-            f"Refund for order #{order.id} — status: {refund.status.value} "
-            f"(requested {refund.created_at.date()})."
-        )
+    try:
+        with Session(engine) as session:
+            order, err = _verify_order(session, order_id, email)
+            if err:
+                return err
+            refund = session.exec(
+                select(RefundRequest).where(RefundRequest.order_id == order.id)
+            ).first()
+            if refund is None:
+                return f"There's no refund request on file for order #{order.id}."
+            return (
+                f"Refund for order #{order.id} — status: {refund.status.value} "
+                f"(requested {refund.created_at.date()})."
+            )
+    except Exception:
+        logging.exception("get_refund_status failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 @tool
@@ -313,41 +330,45 @@ def create_refund_request(order_id: int, email: str, reason: str) -> str:
     """Create a refund request for an order. Only delivered orders are
     eligible for a refund. Requires the order ID, the email used for the
     purchase, and a reason for the refund."""
-    with Session(engine) as session:
-        order, err = _verify_order(session, order_id, email)
-        if err:
-            return err
-        if order.status != OrderStatus.delivered:
-            explanations = {
-                OrderStatus.pending: "it hasn't shipped yet",
-                OrderStatus.shipped: "it's still in transit and hasn't been delivered",
-                OrderStatus.cancelled: "it was cancelled",
-            }
-            why = explanations.get(
-                order.status, f"its status is {order.status.value}"
+    try:
+        with Session(engine) as session:
+            order, err = _verify_order(session, order_id, email)
+            if err:
+                return err
+            if order.status != OrderStatus.delivered:
+                explanations = {
+                    OrderStatus.pending: "it hasn't shipped yet",
+                    OrderStatus.shipped: "it's still in transit and hasn't been delivered",
+                    OrderStatus.cancelled: "it was cancelled",
+                }
+                why = explanations.get(
+                    order.status, f"its status is {order.status.value}"
+                )
+                return (
+                    f"Order #{order.id} isn't eligible for a refund because {why}. "
+                    "Refunds can only be requested for delivered orders."
+                )
+            existing = session.exec(
+                select(RefundRequest).where(RefundRequest.order_id == order.id)
+            ).first()
+            if existing is not None:
+                return (
+                    f"A refund request already exists for order #{order.id} "
+                    f"(status: {existing.status.value}). No new request was created."
+                )
+            refund = RefundRequest(
+                order_id=order.id, reason=reason, status=RefundStatus.requested
             )
+            session.add(refund)
+            session.commit()
+            session.refresh(refund)
             return (
-                f"Order #{order.id} isn't eligible for a refund because {why}. "
-                "Refunds can only be requested for delivered orders."
+                f"Refund request #{refund.id} submitted for order #{order.id}. "
+                "Our team will review it and follow up."
             )
-        existing = session.exec(
-            select(RefundRequest).where(RefundRequest.order_id == order.id)
-        ).first()
-        if existing is not None:
-            return (
-                f"A refund request already exists for order #{order.id} "
-                f"(status: {existing.status.value}). No new request was created."
-            )
-        refund = RefundRequest(
-            order_id=order.id, reason=reason, status=RefundStatus.requested
-        )
-        session.add(refund)
-        session.commit()
-        session.refresh(refund)
-        return (
-            f"Refund request #{refund.id} submitted for order #{order.id}. "
-            "Our team will review it and follow up."
-        )
+    except Exception:
+        logging.exception("create_refund_request failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 # Prefix the agent watches for to recognise a weak policy match. When it sees
@@ -360,22 +381,26 @@ def search_policy_docs(query: str) -> str:
     """Search the store's policy documents (returns, shipping, payments, and
     other general store policies) for information relevant to the customer's
     question."""
-    results = search_with_scores(query)
-    if not results:
-        _log_retrieval(query, top_score=0.0, was_confident=False)
-        return "I couldn't find any relevant policy information for that question."
-    top_score = results[0][1]
-    was_confident = top_score >= settings.confidence_threshold
-    _log_retrieval(query, top_score=top_score, was_confident=was_confident)
-    chunks = "\n\n---\n\n".join(doc.page_content for doc, _ in results)
-    if not was_confident:
-        return (
-            f"{LOW_CONFIDENCE_PREFIX}: the closest policy match scored "
-            f"{top_score:.2f}, below the {settings.confidence_threshold} "
-            "confidence threshold. Treat the excerpts below as uncertain — do "
-            "not state them as definitive:\n\n" + chunks
-        )
-    return chunks
+    try:
+        results = search_with_scores(query)
+        if not results:
+            _log_retrieval(query, top_score=0.0, was_confident=False)
+            return "I couldn't find any relevant policy information for that question."
+        top_score = results[0][1]
+        was_confident = top_score >= settings.confidence_threshold
+        _log_retrieval(query, top_score=top_score, was_confident=was_confident)
+        chunks = "\n\n---\n\n".join(doc.page_content for doc, _ in results)
+        if not was_confident:
+            return (
+                f"{LOW_CONFIDENCE_PREFIX}: the closest policy match scored "
+                f"{top_score:.2f}, below the {settings.confidence_threshold} "
+                "confidence threshold. Treat the excerpts below as uncertain — do "
+                "not state them as definitive:\n\n" + chunks
+            )
+        return chunks
+    except Exception:
+        logging.exception("search_policy_docs failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 def _log_retrieval(query: str, top_score: float, was_confident: bool) -> None:
@@ -432,16 +457,20 @@ def create_ticket(subject: str) -> str:
     ticket. Call this when the customer explicitly asks to talk to a human, or
     when you cannot resolve their issue with the other tools. `subject` should
     be a short one-line summary of what the customer needs help with."""
-    session_id = current_session_id.get()
-    if session_id is None:
-        # No active session context — never raise; report failure as text so the
-        # agent can apologise rather than crash the turn (F4 convention).
-        return (
-            "I couldn't open a support ticket right now. Please try again in a "
-            "moment."
-        )
-    with Session(engine) as session:
-        return _open_ticket(session, session_id, subject)
+    try:
+        session_id = current_session_id.get()
+        if session_id is None:
+            # No active session context — never raise; report failure as text so the
+            # agent can apologise rather than crash the turn (F4 convention).
+            return (
+                "I couldn't open a support ticket right now. Please try again in a "
+                "moment."
+            )
+        with Session(engine) as session:
+            return _open_ticket(session, session_id, subject)
+    except Exception:
+        logging.exception("create_ticket failed")
+        return "I wasn't able to complete that lookup right now. Please try again in a moment."
 
 
 # Registered together for the agent core (F5); create_ticket added for F7.

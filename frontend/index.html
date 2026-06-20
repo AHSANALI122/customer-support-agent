@@ -109,6 +109,26 @@
       }
     }
 
+    function showErrorBubble(originalText, onResend) {
+      const wrapper = document.createElement('div');
+      wrapper.className = 'flex justify-start';
+      const bubble = document.createElement('div');
+      bubble.className =
+        'bg-red-50 text-red-600 border border-red-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] text-sm leading-relaxed';
+      const resendBtn = document.createElement('button');
+      resendBtn.className = 'underline font-medium ml-1';
+      resendBtn.textContent = 'Resend';
+      resendBtn.addEventListener('click', () => {
+        wrapper.remove();
+        messageInput.value = originalText;
+        onResend();
+      });
+      bubble.append('Something went wrong. ', resendBtn);
+      wrapper.appendChild(bubble);
+      messagesEl.appendChild(wrapper);
+      scrollToBottom();
+    }
+
     async function sendMessage() {
       const text = messageInput.value.trim();
       if (!text) return;
@@ -202,6 +222,8 @@
               scrollToBottom();
             } else if (eventType === 'tool_call') {
               thinkingTextEl.textContent = 'Checking your order…';
+            } else if (eventType === 'error') {
+              showErrorBubble(text, sendMessage);
             } else if (eventType === 'done') {
               sessionId = payload.session_id;
               // Fallback: if the model replied without streaming tokens (rare),
@@ -230,23 +252,7 @@
           }
         }
       } catch {
-        const wrapper = document.createElement('div');
-        wrapper.className = 'flex justify-start';
-        const bubble = document.createElement('div');
-        bubble.className =
-          'bg-red-50 text-red-600 border border-red-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] text-sm leading-relaxed';
-        const resendBtn = document.createElement('button');
-        resendBtn.className = 'underline font-medium ml-1';
-        resendBtn.textContent = 'Resend';
-        resendBtn.addEventListener('click', () => {
-          wrapper.remove();
-          messageInput.value = text;
-          sendMessage();
-        });
-        bubble.append('Something went wrong. ', resendBtn);
-        wrapper.appendChild(bubble);
-        messagesEl.appendChild(wrapper);
-        scrollToBottom();
+        showErrorBubble(text, sendMessage);
       } finally {
         setLoading(false);
         messageInput.focus();
