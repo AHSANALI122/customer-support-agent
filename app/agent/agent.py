@@ -7,6 +7,8 @@ Persisting messages is the chat API's job (F6); this module only reads history
 and returns the assistant's reply.
 """
 
+import asyncio
+import json
 import uuid
 from functools import lru_cache
 
@@ -90,3 +92,47 @@ def run_agent(
         config=RunnableConfig(callbacks=[ToolLoggingCallback()]),
     )
     return result["messages"][-1].content
+
+
+async def stream_agent(
+    session_id: uuid.UUID | str,
+    message: str,
+    customer_email: str | None = None,
+):
+    """Async generator yielding SSE-formatted strings for one agent turn.
+
+    Emits three event types:
+      token     — one chunk of assistant text
+      tool_call — the agent is calling a named tool
+      done      — generation finished; carries session_id and full_reply
+    """
+    if isinstance(session_id, str):
+        session_id = uuid.UUID(session_id)
+
+    current_session_id.set(session_id)
+
+    messages = [SystemMessage(content=build_system_prompt(customer_email))]
+    messages.extend(_load_history(session_id))
+    messages.append(HumanMessage(content=message))
+
+    config = RunnableConfig(callbacks=[ToolLoggingCallback()])
+    parts: list[str] = []
+
+    async for event in get_agent().astream_events(
+        {"messages": messages}, config=config, version="v2"
+    ):
+        kind = event["event"]
+
+        if kind == "on_chat_model_stream":
+            content = event["data"]["chunk"].content
+            text = content if isinstance(content, str) else ""
+            if text:
+                parts.append(text)
+                yield f'event: token\ndata: {json.dumps({"text": text})}\n\n'
+
+        elif kind == "on_tool_start":
+            tool_name = event.get("name", "")
+            yield f'event: tool_call\ndata: {json.dumps({"tool": tool_name})}\n\n'
+
+    full_reply = "".join(parts)
+    yield f'event: done\ndata: {json.dumps({"session_id": str(session_id), "full_reply": full_reply})}\n\n'

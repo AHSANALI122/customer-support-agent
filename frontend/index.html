@@ -45,7 +45,7 @@
             <span class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 150ms"></span>
             <span class="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style="animation-delay: 300ms"></span>
           </span>
-          <span>Thinking&hellip;</span>
+          <span id="thinking-text">Thinking&hellip;</span>
         </div>
       </div>
     </div>
@@ -97,11 +97,16 @@
       scrollToBottom();
     }
 
+    const thinkingTextEl = document.getElementById('thinking-text');
+
     function setLoading(isLoading) {
       loadingEl.classList.toggle('hidden', !isLoading);
-      sendBtn.disabled       = isLoading;
-      messageInput.disabled  = isLoading;
-      if (isLoading) scrollToBottom();
+      sendBtn.disabled      = isLoading;
+      messageInput.disabled = isLoading;
+      if (isLoading) {
+        thinkingTextEl.textContent = 'Thinking…';
+        scrollToBottom();
+      }
     }
 
     async function sendMessage() {
@@ -109,13 +114,29 @@
       if (!text) return;
 
       const email = emailInput.value.trim() || null;
-
       messageInput.value = '';
       appendMessage('user', text);
       setLoading(true);
 
+      // The assistant bubble is created on the first token so tokens can be
+      // appended in-place; null means no bubble yet.
+      let assistantBubble = null;
+
+      function getOrCreateAssistantBubble() {
+        if (assistantBubble) return assistantBubble;
+        setLoading(false);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex justify-start';
+        assistantBubble = document.createElement('div');
+        assistantBubble.className =
+          'bg-gray-100 text-gray-800 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] text-sm leading-relaxed';
+        wrapper.appendChild(assistantBubble);
+        messagesEl.appendChild(wrapper);
+        return assistantBubble;
+      }
+
       try {
-        const res = await fetch('/chat', {
+        const res = await fetch('/chat/stream', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -127,11 +148,63 @@
 
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
 
-        const data = await res.json();
-        sessionId  = data.session_id;
-        appendMessage('assistant', data.reply);
+        const reader  = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer    = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const blocks = buffer.split('\n\n');
+          buffer = blocks.pop(); // keep the last incomplete block
+
+          for (const block of blocks) {
+            if (!block.trim()) continue;
+
+            const lines     = block.split('\n');
+            const eventLine = lines.find(l => l.startsWith('event:'));
+            const dataLine  = lines.find(l => l.startsWith('data:'));
+            if (!eventLine || !dataLine) continue;
+
+            const eventType = eventLine.slice(6).trim();
+            let payload;
+            try { payload = JSON.parse(dataLine.slice(5).trim()); } catch { continue; }
+
+            if (eventType === 'token') {
+              getOrCreateAssistantBubble().textContent += payload.text;
+              scrollToBottom();
+            } else if (eventType === 'tool_call') {
+              thinkingTextEl.textContent = 'Checking your order…';
+            } else if (eventType === 'done') {
+              sessionId = payload.session_id;
+              // Fallback: if the model replied without streaming tokens (rare),
+              // render the full reply from the done payload.
+              if (!assistantBubble && payload.full_reply) {
+                appendMessage('assistant', payload.full_reply);
+              }
+            }
+          }
+        }
       } catch {
-        appendMessage('assistant', 'Something went wrong. Please try again.');
+        const wrapper = document.createElement('div');
+        wrapper.className = 'flex justify-start';
+        const bubble = document.createElement('div');
+        bubble.className =
+          'bg-red-50 text-red-600 border border-red-200 rounded-2xl rounded-tl-sm px-4 py-3 max-w-[80%] text-sm leading-relaxed';
+        const resendBtn = document.createElement('button');
+        resendBtn.className = 'underline font-medium ml-1';
+        resendBtn.textContent = 'Resend';
+        resendBtn.addEventListener('click', () => {
+          wrapper.remove();
+          messageInput.value = text;
+          sendMessage();
+        });
+        bubble.append('Something went wrong. ', resendBtn);
+        wrapper.appendChild(bubble);
+        messagesEl.appendChild(wrapper);
+        scrollToBottom();
       } finally {
         setLoading(false);
         messageInput.focus();
