@@ -1,9 +1,13 @@
-"""LangChain tools that read and write live order data (F4).
+"""LangChain tools that read and write live order data (F4) and escalate to a
+human (F7).
 
 Every tool that touches a specific order takes `email` as a required
 parameter and verifies it against the order's customer before returning
 anything — this enforces the lightweight verification rule from F8.
 """
+
+import contextvars
+import uuid
 
 from langchain_core.tools import tool
 from sqlmodel import Session, select
@@ -11,6 +15,7 @@ from sqlmodel import Session, select
 from app.config import settings
 from app.db import engine
 from app.models import (
+    ChatSession,
     Customer,
     Order,
     OrderItem,
@@ -18,8 +23,16 @@ from app.models import (
     Product,
     RefundRequest,
     RefundStatus,
+    SupportTicket,
+    TicketStatus,
 )
 from app.rag.retriever import search_with_scores
+
+# Set by run_agent (F5) before each turn so escalation can tie a ticket to the
+# active session without the LLM ever handling the internal UUID (F7).
+current_session_id: contextvars.ContextVar[uuid.UUID | None] = contextvars.ContextVar(
+    "current_session_id", default=None
+)
 
 # Generic message used whenever an email doesn't match an order. It never
 # reveals which value was wrong, so it can't be used to probe for valid
@@ -210,7 +223,55 @@ def search_policy_docs(query: str) -> str:
     return chunks
 
 
-# Registered together for the agent core (F5).
+# Ticket statuses that count as an active, unresolved case. A session already
+# holding one of these shouldn't spawn a duplicate ticket (F7).
+_ACTIVE_TICKET_STATUSES = [TicketStatus.open, TicketStatus.in_progress]
+
+
+@tool
+def create_ticket(subject: str) -> str:
+    """Escalate the conversation to a human support agent by opening a support
+    ticket. Call this when the customer explicitly asks to talk to a human, or
+    when you cannot resolve their issue with the other tools. `subject` should
+    be a short one-line summary of what the customer needs help with."""
+    session_id = current_session_id.get()
+    if session_id is None:
+        # No active session context — never raise; report failure as text so the
+        # agent can apologise rather than crash the turn (F4 convention).
+        return (
+            "I couldn't open a support ticket right now. Please try again in a "
+            "moment."
+        )
+    with Session(engine) as session:
+        existing = session.exec(
+            select(SupportTicket)
+            .where(SupportTicket.session_id == session_id)
+            .where(SupportTicket.status.in_(_ACTIVE_TICKET_STATUSES))
+        ).first()
+        if existing is not None:
+            return (
+                f"Your case is already with our support team (ticket "
+                f"#{existing.id}). A human will follow up — there's no need to "
+                "open another ticket."
+            )
+        chat_session = session.get(ChatSession, session_id)
+        customer_id = chat_session.customer_id if chat_session else None
+        ticket = SupportTicket(
+            session_id=session_id,
+            customer_id=customer_id,
+            subject=subject,
+            status=TicketStatus.open,
+        )
+        session.add(ticket)
+        session.commit()
+        session.refresh(ticket)
+        return (
+            f"I've opened support ticket #{ticket.id} for you. A member of our "
+            "team will review the conversation and follow up."
+        )
+
+
+# Registered together for the agent core (F5); create_ticket added for F7.
 CUSTOMER_TOOLS = [
     list_orders_by_email,
     get_order_status,
@@ -218,4 +279,5 @@ CUSTOMER_TOOLS = [
     get_refund_status,
     create_refund_request,
     search_policy_docs,
+    create_ticket,
 ]
