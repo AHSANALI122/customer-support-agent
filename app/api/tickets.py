@@ -9,7 +9,7 @@ can pick up the case with enough context. Protected by the shared admin token
 from fastapi import APIRouter, Depends
 from sqlmodel import Session, select
 
-from app.api.orders import verify_admin
+from app.api.deps import verify_admin
 from app.db import engine
 from app.models import ChatMessage, SupportTicket, TicketStatus
 

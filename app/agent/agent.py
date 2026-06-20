@@ -15,11 +15,11 @@ import uuid
 from functools import lru_cache
 
 import httpx
-from google.genai.errors import ClientError
+from groq import RateLimitError
 from langchain.agents import create_agent
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langgraph.errors import GraphRecursionError
 from sqlmodel import Session
 
@@ -50,11 +50,11 @@ _GENERIC_ERROR_SSE = (
 @lru_cache(maxsize=1)
 def get_agent():
     """Build (once) the tool-calling agent bound to the Gemini chat model."""
-    llm = ChatGoogleGenerativeAI(
+    llm = ChatGroq(
         model=settings.model_name,
-        google_api_key=settings.google_api_key,
+        api_key=settings.groq_api_key,
         temperature=0.3,
-        timeout=settings.llm_timeout_seconds,
+        request_timeout=settings.llm_timeout_seconds,
         max_retries=0,  # we own retry logic explicitly (F13)
     )
     return create_agent(llm, tools=CUSTOMER_TOOLS)
@@ -72,12 +72,10 @@ def _call_with_retry(fn, *args, **kwargs):
         logging.warning("LLM connection error, retrying once…")
         time.sleep(1)
         return fn(*args, **kwargs)
-    except ClientError as e:
-        if e.code == 429:
-            logging.warning("LLM rate-limited (429), backing off and retrying…")
-            time.sleep(2)
-            return fn(*args, **kwargs)
-        raise
+    except RateLimitError:
+        logging.warning("LLM rate-limited (429), backing off and retrying…")
+        time.sleep(2)
+        return fn(*args, **kwargs)
 
 
 def _escalate_on_loop(session_id: uuid.UUID) -> str:

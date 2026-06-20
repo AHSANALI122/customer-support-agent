@@ -3,7 +3,7 @@ from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.config import settings
 
@@ -45,10 +45,7 @@ def ingest() -> None:
     ids = build_chunk_ids(chunks)
     print(f"  {len(docs)} document(s) -> {len(chunks)} chunk(s)")
 
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=settings.embed_model_name,
-        google_api_key=settings.google_api_key,
-    )
+    embeddings = HuggingFaceEmbeddings(model_name=settings.embed_model_name)
     vectorstore = Chroma(
         collection_name=COLLECTION_NAME,
         embedding_function=embeddings,

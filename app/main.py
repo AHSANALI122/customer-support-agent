@@ -71,11 +71,11 @@ def health():
     except Exception:
         result["db"] = "error"
 
-    # LLM check — list models (free, no quota cost) to validate the key
+    # LLM check — list models to validate the Groq API key
     try:
-        from google import genai as google_genai
-        client = google_genai.Client(api_key=settings.google_api_key)
-        models = list(client.models.list())
+        from groq import Groq
+        client = Groq(api_key=settings.groq_api_key)
+        models = list(client.models.list().data)
         if not models:
             raise ValueError("No models returned")
     except Exception:
