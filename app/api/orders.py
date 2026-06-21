@@ -6,28 +6,15 @@ a human decision, never something the agent does on its own. Protected by
 the shared admin token (F14).
 """
 
-from typing import Optional
-
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app.config import settings
+from app.api.deps import verify_admin
 from app.db import engine
 from app.models import RefundRequest, RefundStatus
 
 router = APIRouter()
-
-
-def verify_admin(
-    x_admin_token: Optional[str] = Header(default=None, alias="X-Admin-Token"),
-) -> None:
-    """Reject any request without a valid admin token (F14).
-
-    A missing or wrong token returns 401 before any data is touched.
-    """
-    if not settings.admin_token or x_admin_token != settings.admin_token:
-        raise HTTPException(status_code=401, detail="Invalid or missing admin token.")
 
 
 class RefundUpdate(BaseModel):

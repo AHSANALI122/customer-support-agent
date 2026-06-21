@@ -1,7 +1,7 @@
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
-from langchain_google_genai import GoogleGenerativeAIEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 
 from app.config import settings
 
@@ -9,10 +9,7 @@ COLLECTION_NAME = "support_policies"
 
 
 def get_vectorstore() -> Chroma:
-    embeddings = GoogleGenerativeAIEmbeddings(
-        model=settings.embed_model_name,
-        google_api_key=settings.google_api_key,
-    )
+    embeddings = HuggingFaceEmbeddings(model_name=settings.embed_model_name)
     return Chroma(
         collection_name=COLLECTION_NAME,
         embedding_function=embeddings,

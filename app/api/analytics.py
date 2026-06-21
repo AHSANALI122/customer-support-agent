@@ -10,7 +10,7 @@ from datetime import date, datetime, timezone
 from fastapi import APIRouter, Depends, Query
 from sqlmodel import Session, func, select
 
-from app.api.orders import verify_admin
+from app.api.deps import verify_admin
 from app.db import engine
 from app.models import (
     ChatMessage,

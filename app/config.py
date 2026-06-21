@@ -6,9 +6,9 @@ load_dotenv()
 
 class Settings:
     database_url: str = os.getenv("DATABASE_URL", "sqlite:///./support_agent.db")
-    google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
-    model_name: str = os.getenv("MODEL_NAME", "gemini-2.0-flash")
-    embed_model_name: str = os.getenv("EMBED_MODEL_NAME", "models/text-embedding-004")
+    groq_api_key: str = os.getenv("GROQ_API_KEY", "")
+    model_name: str = os.getenv("MODEL_NAME", "llama-3.3-70b-versatile")
+    embed_model_name: str = os.getenv("EMBED_MODEL_NAME", "sentence-transformers/all-MiniLM-L6-v2")
     chroma_path: str = os.getenv("CHROMA_PATH", "./chroma_db")
     admin_token: str = os.getenv("ADMIN_TOKEN", "")
     # Below this relevance score (0–1, higher = more relevant) a policy match is
