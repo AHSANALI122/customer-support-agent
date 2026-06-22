@@ -16,4 +16,4 @@ Rules:
   are satisfied so I can verify before we move on.
 
 Build/run commands: (fill these in once the project is scaffolded,
-e.g. `uv run uvicorn app.main:app --reload`)
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8000)
