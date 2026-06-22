@@ -7,11 +7,12 @@ create_react_agent to avoid Groq tool-call JSON compatibility issues.
 import asyncio
 import json
 import logging
+import re
 import time
 import uuid
 
 import httpx
-from groq import APIError as GroqAPIError, RateLimitError
+from groq import APIError as GroqAPIError, BadRequestError, RateLimitError
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_groq import ChatGroq
 from sqlmodel import Session
@@ -34,6 +35,22 @@ _GENERIC_ERROR_SSE = (
 
 # Built once at import time so tool lookup is O(1).
 _TOOL_MAP = {t.name: t for t in CUSTOMER_TOOLS}
+
+# llama-3.x on Groq intermittently emits its *native* function-call markup —
+# `<function=name{...json...}</function>` — instead of the OpenAI tool-call JSON
+# schema. Groq can't parse that into a tool call, so it returns HTTP 400
+# `tool_use_failed` with the raw markup in the error's `failed_generation` field.
+# These patterns parse that markup back into a real tool call so the turn can
+# continue instead of being thrown away. The `>` after the name is optional
+# because the model emits both `<function=name>{...}` and `<function=name{...}`.
+_FUNCTION_CALL_RE = re.compile(
+    r"<function\s*=\s*([a-zA-Z0-9_]+)\s*>?\s*(\{.*?\})\s*</function>",
+    re.DOTALL,
+)
+_FUNCTION_CALL_RE_OPEN = re.compile(
+    r"<function\s*=\s*([a-zA-Z0-9_]+)\s*>?\s*(\{.*\})",
+    re.DOTALL,
+)
 
 
 class _ToolCapture:
@@ -120,7 +137,12 @@ def _force_final_answer(msgs: list, session_id: uuid.UUID | None) -> str:
 
 
 def _call_with_retry(fn, *args, **kwargs):
-    """Call fn once, retry once on transient Groq/network failures."""
+    """Call fn once, retry once on transient Groq/network failures.
+
+    A 400 BadRequestError is *not* transient — the request payload is the
+    problem, not the connection — so it propagates immediately for the caller to
+    handle (e.g. tool_use_failed recovery) rather than being retried blindly.
+    """
     try:
         return fn(*args, **kwargs)
     except httpx.TimeoutException:
@@ -135,10 +157,83 @@ def _call_with_retry(fn, *args, **kwargs):
         logger.warning("LLM rate-limited (429), backing off and retrying…")
         time.sleep(2)
         return fn(*args, **kwargs)
+    except BadRequestError:
+        raise
     except GroqAPIError as exc:
         logger.warning("Groq API error (%s), retrying once…", exc)
         time.sleep(1)
         return fn(*args, **kwargs)
+
+
+def _extract_failed_generation(exc: BadRequestError) -> str | None:
+    """Pull `failed_generation` out of a Groq tool_use_failed error, or None.
+
+    Returns None for any other 400 so unrelated bad requests still surface.
+    """
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        try:
+            body = exc.response.json()
+        except Exception:
+            return None
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict) and error.get("code") == "tool_use_failed":
+        failed = error.get("failed_generation")
+        return failed if isinstance(failed, str) else None
+    return None
+
+
+def _recover_tool_calls(failed_generation: str) -> list[dict]:
+    """Parse Llama's native `<function=name{...}</function>` markup into the
+    tool-call dict shape LangChain expects. Returns [] if nothing parses."""
+    matches = _FUNCTION_CALL_RE.findall(failed_generation)
+    if not matches:
+        matches = _FUNCTION_CALL_RE_OPEN.findall(failed_generation)
+
+    tool_calls: list[dict] = []
+    for name, raw_args in matches:
+        try:
+            args = json.loads(raw_args)
+        except json.JSONDecodeError:
+            logger.warning("Could not parse recovered args for %s: %r", name, raw_args)
+            continue
+        if not isinstance(args, dict):
+            continue
+        tool_calls.append(
+            {
+                "name": name,
+                "args": args,
+                "id": f"recovered_{uuid.uuid4().hex[:8]}",
+                "type": "tool_call",
+            }
+        )
+    return tool_calls
+
+
+def _invoke_llm(llm, msgs):
+    """Invoke the tool-bound LLM, recovering from Groq's `tool_use_failed` 400.
+
+    When llama emits its native function-call markup instead of OpenAI JSON,
+    Groq returns a 400 with the raw markup in `failed_generation`. We parse it
+    back into a proper AIMessage with tool_calls so the loop continues — instead
+    of failing the whole turn the way a blind retry of the same prompt would.
+    """
+    try:
+        return _call_with_retry(llm.invoke, msgs)
+    except BadRequestError as exc:
+        failed = _extract_failed_generation(exc)
+        if failed is None:
+            raise
+        recovered = _recover_tool_calls(failed)
+        if not recovered:
+            logger.error("tool_use_failed but no tool call could be recovered")
+            raise
+        logger.warning(
+            "Recovered %d tool call(s) from Groq tool_use_failed: %s",
+            len(recovered),
+            [tc["name"] for tc in recovered],
+        )
+        return AIMessage(content="", tool_calls=recovered)
 
 
 def _escalate_on_loop(session_id: uuid.UUID) -> str:
@@ -196,7 +291,7 @@ def _run_tool_loop(
 
     for iteration in range(settings.agent_max_iterations):
         try:
-            response = _call_with_retry(llm.invoke, msgs)
+            response = _invoke_llm(llm, msgs)
         except Exception:
             logger.exception("LLM invoke failed on iteration %d", iteration)
             return FALLBACK_MESSAGE
